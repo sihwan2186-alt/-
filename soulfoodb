@@ -1,0 +1,2076 @@
+package soulfoodb;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.io.*;
+import java.util.*;
+import java.util.List;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.stream.Collectors;
+
+import dbconnect.DBConnect;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
+
+public class Soulfoodb extends JFrame {
+
+    private CardLayout cardLayout;
+    private JPanel mainPanel;
+
+    // --- 데이터 저장소 ---
+    private Map<String, String> userData = new HashMap<>(); // ID : PW
+    private Map<String, Set<String>> userCategoryData = new HashMap<>(); // ID : [분식, 한식...]
+
+    // --- 회원가입 임시 저장 변수 (1단계 -> 2단계 전달용) ---
+    private String tempSignupId;
+    private String tempSignupPw;
+
+    // --- UI 컴포넌트 ---
+    private JTextField loginUserField;
+    private JPasswordField loginPassField;
+    private JTextField signupUserField;
+    private JPasswordField signupPassField;
+    private JComboBox<String> foodCategoryBox; 
+    private JSpinner sweetSpinner, spicySpinner, saltySpinner;
+    
+    // 정렬 체크박스 (클래스 멤버로 승격하여 어디서든 접근 가능하게 함)
+    private JCheckBox frequentOrderBox;
+    private JCheckBox recentOrderBox;
+    private JCheckBox recentAddBox;
+
+    // --- 카테고리 선택 체크박스 관리 ---
+    private List<JCheckBox> categoryCheckBoxes = new ArrayList<>();
+    private final String[] foodCategories = {
+            "분식", "패스트푸드", "찜/탕", "구이/볶음",
+            "족발/보쌈", "돈까스", "회/해물", "밥류", "면류"
+    };
+
+    // --- 파일명 상수 ---
+    private final String USER_DATA_FILE = "users.txt";
+    private final String USER_CATEGORY_FILE = "user_categories.txt";
+    private final String ORDER_HISTORY_FILE = "order_history.txt";
+    private final String FAVORITE_FOOD_FILE = "favorites.txt";
+    private final String SHOP_DATA_FILE = "shops.txt";
+    
+    // --- 상태 변수 ---
+    private String currentUser = null;
+    private boolean isAdmin = false;
+
+    // --- 음식 및 데이터 관련 ---
+    private final Map<String, MenuItem> menuData = new HashMap<>();
+    private final Map<String, List<String>> categoryToFoodMap = new HashMap<>();
+    private Map<String, List<Shop>> shopData = new HashMap<>();
+
+    private List<FoodOrder> currentOrderList = new ArrayList<>();
+    private List<OrderHistory> orderHistoryList = new ArrayList<>();
+    
+    private Map<String, Set<String>> allFavoriteFoods = new HashMap<>();
+    private Set<String> currentUserFavoriteFoods = new HashSet<>(); 
+    private Set<String> recommendedFoodsFromDB = new HashSet<>();
+
+    // --- 화면 패널 변수 ---
+    private JPanel orderListPanel;
+    private JLabel totalOrderCountLabel;
+    private JLabel totalOrderPriceLabel;
+    private JPanel historyListPanel;
+
+    // 추천 및 찜 목록 패널 (동적 갱신용)
+    private JPanel favoriteListPanel; // 왼쪽
+    private JPanel recommendationListPanel; // 오른쪽
+
+    // 카테고리 버튼 필터링용 변수
+    private JPanel foodDisplayPanel;  // 음식을 표시할 패널
+    private String currentSelectedCategory = "전체";  // 현재 선택된 카테고리
+
+    private long totalPrice = 0;
+
+    // -----------------------------------------------------------
+    // 내부 클래스 정의
+    // -----------------------------------------------------------
+
+    private class Shop {
+        String name;
+        int price;
+
+        public Shop(String name, int price) {
+            this.name = name;
+            this.price = price;
+        }
+        
+        @Override
+        public String toString() {
+            return name + "=" + price;
+        }
+    }
+
+    private class MenuItem {
+        String name;
+        String imageFile;
+        int maxPrice;
+
+        public MenuItem(String name, String imageFile, int maxPrice) {
+            this.name = name;
+            this.imageFile = imageFile;
+            this.maxPrice = maxPrice;
+        }
+    }
+
+    private class FoodOrder {
+        String foodName;
+        String shopName;
+        int unitPrice;
+        int quantity;
+
+        public FoodOrder(String foodName, String shopName, int unitPrice, int quantity) {
+            this.foodName = foodName;
+            this.shopName = shopName;
+            this.unitPrice = unitPrice;
+            this.quantity = quantity;
+        }
+
+        public long getTotalPrice() {
+            return (long) unitPrice * quantity;
+        }
+
+        public String toFileString() {
+            return String.format("%s|%s|%d|%d", foodName, shopName, unitPrice, quantity);
+        }
+
+        @Override
+        public String toString() {
+            return String.format("%s (%s) - %,d원 x %d개 = %,d원",
+                    foodName, shopName, unitPrice, quantity, getTotalPrice());
+        }
+    }
+
+    private class OrderHistory {
+        String username;
+        LocalDateTime orderTime;
+        List<FoodOrder> items;
+        long finalPrice;
+        String paymentMethod;
+
+        public OrderHistory(String username, LocalDateTime orderTime, List<FoodOrder> items, long finalPrice, String paymentMethod) {
+            this.username = username;
+            this.orderTime = orderTime;
+            this.items = items;
+            this.finalPrice = finalPrice;
+            this.paymentMethod = paymentMethod;
+        }
+
+        public String toFileString() {
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            StringBuilder sb = new StringBuilder();
+            sb.append(username).append(";")
+                    .append(orderTime.format(formatter)).append(";")
+                    .append(finalPrice).append(";")
+                    .append(paymentMethod).append(":");
+            for (FoodOrder item : items) {
+                sb.append(item.toFileString()).append(":");
+            }
+            return sb.substring(0, sb.length() - 1);
+        }
+    }
+
+    // -----------------------------------------------------------
+    // 생성자 및 초기화
+    // -----------------------------------------------------------
+
+    public Soulfoodb() {
+        setTitle("소울푸드버킷");
+        setSize(1200, 800);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setLocationRelativeTo(null);
+
+        initializeMenuData();
+        initializeCategoryMap();
+        loadUserData();
+        loadUserCategoryData();
+        loadOrderHistory();
+        syncUsersFileToDatabase();  // 파일의 사용자를 DB로 동기화
+        loadAllFavoriteFoods();
+        loadShopData();
+
+        cardLayout = new CardLayout();
+        mainPanel = new JPanel(cardLayout);
+
+        // 패널 생성 및 추가
+        mainPanel.add(createHomePanel(), "HOME");
+        mainPanel.add(createLoginPanel(), "LOGIN");
+        mainPanel.add(createSignupPanel(), "SIGNUP");
+        mainPanel.add(createFoodCategoryPanel(), "SIGNUP_CATEGORY");
+        mainPanel.add(createMainAppPanel(), "MAINAPP");
+
+        mainPanel.add(createFoodMenuScreen(), "FOOD_MENU_SCREEN");
+        mainPanel.add(createFavoriteFoodScreen(), "FAVORITE_FOOD_SCREEN");
+        mainPanel.add(createCurrentOrderScreen(), "CURRENT_ORDER_SCREEN");
+        mainPanel.add(createOrderHistoryScreen(), "ORDER_HISTORY_SCREEN");
+        mainPanel.add(createPaymentScreen(), "PAYMENT_SCREEN");
+
+        mainPanel.add(new JPanel(), "FOOD_DETAIL_SHOP");
+        mainPanel.add(new JPanel(), "FOOD_DETAIL_PRICE");
+        mainPanel.add(new JPanel(), "PAYMENT_COMPLETE");
+
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                saveOrderHistory();
+                saveAllFavoriteFoods();
+                saveShopData();
+                saveUserCategoryData();
+            }
+        });
+
+        add(mainPanel);
+        setVisible(true);
+    }
+
+    private void initializeMenuData() {
+        menuData.put("불고기", new MenuItem("불고기", "bulgogi.png", 50000));
+        menuData.put("김치찌개", new MenuItem("김치찌개", "kimchi_stew.png", 35000));
+        menuData.put("비빔밥", new MenuItem("비빔밥", "bibimbap.png", 25000));
+        menuData.put("삼겹살", new MenuItem("삼겹살", "samgyeopsal.png", 50000));
+        menuData.put("짜장면", new MenuItem("짜장면", "jjajangmyeon.png", 20000));
+        menuData.put("밥", new MenuItem("밥", "rice.png", 10000));
+        menuData.put("치킨", new MenuItem("치킨", "chicken.png", 22000));
+        menuData.put("피자", new MenuItem("피자", "pizza.png", 28000));
+        menuData.put("햄버거", new MenuItem("햄버거", "burger.png", 12000));
+        menuData.put("떡볶이", new MenuItem("떡볶이", "tteokbokki.png", 15000));
+        menuData.put("라면", new MenuItem("라면", "ramen.png", 5000));
+        menuData.put("김밥", new MenuItem("김밥", "kimbap.png", 4500));
+        menuData.put("돈까스", new MenuItem("돈까스", "pork_cutlet.png", 13000));
+        menuData.put("초밥", new MenuItem("초밥", "sushi.png", 30000));
+        menuData.put("파스타", new MenuItem("파스타", "pasta.png", 18000));
+        menuData.put("샌드위치", new MenuItem("샌드위치", "sandwich.png", 8000));
+        menuData.put("짬뽕", new MenuItem("짬뽕", "jjamppong.png", 22000));
+        menuData.put("탕수육", new MenuItem("탕수육", "tangsuyuk.png", 35000));
+        menuData.put("샐러드", new MenuItem("샐러드", "salad.png", 12000));
+        menuData.put("스테이크", new MenuItem("스테이크", "steak.png", 60000));
+    }
+
+    private void initializeCategoryMap() {
+        categoryToFoodMap.put("분식", Arrays.asList("떡볶이", "라면", "김밥"));
+        categoryToFoodMap.put("패스트푸드", Arrays.asList("치킨", "피자", "햄버거", "샌드위치", "샐러드"));
+        categoryToFoodMap.put("찜/탕", Arrays.asList("김치찌개"));
+        categoryToFoodMap.put("구이/볶음", Arrays.asList("불고기", "삼겹살", "스테이크", "탕수육"));
+        categoryToFoodMap.put("돈까스", Arrays.asList("돈까스"));
+        categoryToFoodMap.put("회/해물", Arrays.asList("초밥"));
+        categoryToFoodMap.put("밥류", Arrays.asList("비빔밥", "밥"));
+        categoryToFoodMap.put("면류", Arrays.asList("짜장면", "짬뽕", "파스타"));
+        categoryToFoodMap.put("족발/보쌈", Arrays.asList());
+    }
+
+    // -----------------------------------------------------------
+    // 파일 입출력 메서드
+    // -----------------------------------------------------------
+
+    private void loadShopData() {
+        shopData.clear();
+        File file = new File(SHOP_DATA_FILE);
+        if (file.exists()) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split(":", 2);
+                    if (parts.length == 2) {
+                        String foodName = parts[0];
+                        String[] shopStrings = parts[1].split(",");
+                        List<Shop> shopList = new ArrayList<>();
+                        for (String s : shopStrings) {
+                            String[] shopInfo = s.split("=");
+                            if (shopInfo.length == 2) {
+                                try {
+                                    shopList.add(new Shop(shopInfo[0], Integer.parseInt(shopInfo[1])));
+                                } catch (NumberFormatException e) {}
+                            }
+                        }
+                        shopData.put(foodName, shopList);
+                    }
+                }
+            } catch (IOException e) {}
+        }
+        boolean needSave = false;
+        for (Map.Entry<String, MenuItem> entry : menuData.entrySet()) {
+            String foodName = entry.getKey();
+            if (!shopData.containsKey(foodName)) {
+                int maxPrice = entry.getValue().maxPrice;
+                List<Shop> shops = new ArrayList<>();
+                for (int i = 1; i <= 10; i++) {
+                    int price = (int)(maxPrice * 0.8) + (i * 100); 
+                    shops.add(new Shop(foodName + "음식점" + i, price));
+                }
+                shopData.put(foodName, shops);
+                needSave = true;
+            }
+        }
+        if (!file.exists() || needSave) saveShopData();
+    }
+
+    private void saveShopData() {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(SHOP_DATA_FILE))) {
+            for (Map.Entry<String, List<Shop>> entry : shopData.entrySet()) {
+                writer.print(entry.getKey() + ":");
+                List<Shop> shops = entry.getValue();
+                for (int i = 0; i < shops.size(); i++) {
+                    writer.print(shops.get(i).toString());
+                    if (i < shops.size() - 1) writer.print(",");
+                }
+                writer.println();
+            }
+        } catch (IOException e) {}
+    }
+
+    private void loadUserData() {
+        try (BufferedReader reader = new BufferedReader(new FileReader(USER_DATA_FILE))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(",", 2);
+                if (parts.length == 2) userData.put(parts[0], parts[1]);
+            }
+        } catch (IOException ignored) {}
+    }
+
+    private void saveUserData() {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(USER_DATA_FILE))) {
+            for (Map.Entry<String, String> e : userData.entrySet()) {
+                writer.println(e.getKey() + "," + e.getValue());
+            }
+        } catch (IOException ignored) {}
+    }
+
+    private void loadUserCategoryData() {
+        userCategoryData.clear();
+        try (BufferedReader reader = new BufferedReader(new FileReader(USER_CATEGORY_FILE))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(":", 2);
+                if (parts.length == 2) {
+                    String user = parts[0];
+                    String[] cats = parts[1].split(",");
+                    Set<String> catSet = new HashSet<>();
+                    Collections.addAll(catSet, cats);
+                    userCategoryData.put(user, catSet);
+                }
+            }
+        } catch (IOException ignored) {}
+    }
+
+    private void saveUserCategoryData() {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(USER_CATEGORY_FILE))) {
+            for (Map.Entry<String, Set<String>> entry : userCategoryData.entrySet()) {
+                writer.print(entry.getKey() + ":");
+                String joined = String.join(",", entry.getValue());
+                writer.println(joined);
+            }
+        } catch (IOException ignored) {}
+    }
+
+    private void loadOrderHistory() {
+        orderHistoryList.clear();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+        try (BufferedReader reader = new BufferedReader(new FileReader(ORDER_HISTORY_FILE))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(":", 2);
+                if (parts.length != 2) continue;
+                String header = parts[0];
+                String itemData = parts[1];
+                String[] headerParts = header.split(";");
+                if (headerParts.length != 4) continue;
+                String username = headerParts[0];
+                LocalDateTime orderTime = LocalDateTime.parse(headerParts[1], formatter);
+                long finalPrice = Long.parseLong(headerParts[2]);
+                String paymentMethod = headerParts[3];
+                List<FoodOrder> items = new ArrayList<>();
+                for (String itemStr : itemData.split(":")) {
+                    String[] ip = itemStr.split("\\|");
+                    if (ip.length == 4) {
+                        items.add(new FoodOrder(ip[0], ip[1], Integer.parseInt(ip[2]), Integer.parseInt(ip[3])));
+                    }
+                }
+                if (!items.isEmpty()) orderHistoryList.add(new OrderHistory(username, orderTime, items, finalPrice, paymentMethod));
+            }
+        } catch (Exception e) {}
+    }
+
+    private void saveOrderHistory() {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(ORDER_HISTORY_FILE))) {
+            for (OrderHistory history : orderHistoryList) writer.println(history.toFileString());
+        } catch (IOException e) {}
+    }
+
+    private void loadAllFavoriteFoods() {
+        allFavoriteFoods.clear();
+        try (BufferedReader reader = new BufferedReader(new FileReader(FAVORITE_FOOD_FILE))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(",", 2);
+                if (parts.length == 2) allFavoriteFoods.computeIfAbsent(parts[0], k -> new HashSet<>()).add(parts[1]);
+            }
+        } catch (Exception e) {}
+    }
+
+    private void saveAllFavoriteFoods() {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(FAVORITE_FOOD_FILE))) {
+            for (Map.Entry<String, Set<String>> entry : allFavoriteFoods.entrySet()) {
+                for (String food : entry.getValue()) writer.println(entry.getKey() + "," + food);
+            }
+        } catch (IOException e) {}
+    }
+
+    // -----------------------------------------------------------
+    // 패널 생성 메서드들
+    // -----------------------------------------------------------
+
+    private JPanel createHomePanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+        JButton loginButton = new JButton("로그인");
+        JButton signupButton = new JButton("회원가입");
+        JButton logoutButton = new JButton("로그아웃");
+        logoutButton.setVisible(false);
+
+        loginButton.addActionListener(e -> cardLayout.show(mainPanel, "LOGIN"));
+        signupButton.addActionListener(e -> cardLayout.show(mainPanel, "SIGNUP"));
+        logoutButton.addActionListener(e -> logoutUser());
+
+        topPanel.add(loginButton);
+        topPanel.add(signupButton);
+        topPanel.add(logoutButton);
+        panel.add(topPanel, BorderLayout.NORTH);
+
+        JLabel imageLabel = new JLabel("이미지 영역", SwingConstants.CENTER);
+        try {
+            ImageIcon icon = new ImageIcon("image01.png");
+            Image img = icon.getImage().getScaledInstance(1000, 600, Image.SCALE_SMOOTH);
+            imageLabel.setIcon(new ImageIcon(img));
+            imageLabel.setText("");
+        } catch (Exception e) {}
+        panel.add(imageLabel, BorderLayout.CENTER);
+
+        panel.addComponentListener(new ComponentAdapter() {
+            public void componentShown(ComponentEvent e) {
+                boolean isLoggedIn = (currentUser != null || isAdmin);
+                logoutButton.setVisible(isLoggedIn);
+                loginButton.setVisible(!isLoggedIn);
+                signupButton.setVisible(!isLoggedIn);
+            }
+        });
+        return panel;
+    }
+
+    private JPanel createLoginPanel() {
+        JPanel panel = new JPanel(new GridLayout(7, 1, 5, 5));
+        panel.setBorder(BorderFactory.createEmptyBorder(80, 300, 80, 300));
+        JLabel userLabel = new JLabel("사용자명:");
+        JLabel passLabel = new JLabel("비밀번호:");
+        JLabel errorLabel = new JLabel("", SwingConstants.CENTER);
+        errorLabel.setForeground(Color.RED);
+        loginUserField = new JTextField();
+        loginPassField = new JPasswordField();
+        JButton loginButton = new JButton("로그인");
+        loginButton.addActionListener(e -> handleLogin(errorLabel));
+        JButton backButton = new JButton("뒤로가기");
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "HOME"));
+        panel.add(userLabel); panel.add(loginUserField); panel.add(passLabel); panel.add(loginPassField);
+        panel.add(loginButton); panel.add(errorLabel); panel.add(backButton);
+        return panel;
+    }
+
+    private JPanel createSignupPanel() {
+        JPanel panel = new JPanel(new GridLayout(22, 1, 5, 5));
+        panel.setBorder(BorderFactory.createEmptyBorder(20, 300, 20, 300));
+        signupUserField = new JTextField();
+        signupPassField = new JPasswordField();
+        foodCategoryBox = new JComboBox<>(new String[]{"한식", "일식", "중식", "양식"});
+        sweetSpinner = new JSpinner(new SpinnerNumberModel(0, 0, 5, 1));
+        spicySpinner = new JSpinner(new SpinnerNumberModel(0, 0, 5, 1));
+        saltySpinner = new JSpinner(new SpinnerNumberModel(0, 0, 5, 1));
+
+        panel.add(new JLabel("사용자명 (최대 20자):")); panel.add(signupUserField);
+        panel.add(new JLabel("비밀번호 (최대 20자):")); panel.add(signupPassField);
+        panel.add(new JLabel("대표 선호 카테고리:")); panel.add(foodCategoryBox);
+        panel.add(new JLabel("단맛 선호도 (0~5):")); panel.add(sweetSpinner);
+        panel.add(new JLabel("매운맛 선호도 (0~5):")); panel.add(spicySpinner);
+        panel.add(new JLabel("짠맛 선호도 (0~5):")); panel.add(saltySpinner);
+
+        JButton nextButton = new JButton("다음 단계 (음식 취향 선택) >");
+        nextButton.setFont(new Font("맑은 고딕", Font.BOLD, 14));
+        nextButton.addActionListener(e -> handleSignupStep1());
+        JButton backButton = new JButton("뒤로가기");
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "HOME"));
+        panel.add(nextButton); panel.add(backButton);
+        return panel;
+    }
+
+    private JPanel createFoodCategoryPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(30, 30, 30, 30));
+        JLabel titleLabel = new JLabel("<html><h2>상세 음식 취향을 선택해주세요</h2><p>선택하신 카테고리를 기반으로 추천해드립니다.</p></html>", SwingConstants.CENTER);
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        JPanel checkPanel = new JPanel(new GridLayout(0, 3, 15, 15));
+        checkPanel.setBorder(BorderFactory.createEmptyBorder(20, 50, 20, 50));
+        categoryCheckBoxes.clear();
+        for (String category : foodCategories) {
+            JCheckBox chk = new JCheckBox(category);
+            chk.setFont(new Font("맑은 고딕", Font.PLAIN, 16));
+            chk.setHorizontalAlignment(SwingConstants.CENTER);
+            chk.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+            chk.setBorderPainted(true);
+            chk.setPreferredSize(new Dimension(100, 60));
+            categoryCheckBoxes.add(chk);
+            checkPanel.add(chk);
+        }
+        panel.add(checkPanel, BorderLayout.CENTER);
+
+        JButton finishButton = new JButton("회원가입 완료");
+        finishButton.setFont(new Font("맑은 고딕", Font.BOLD, 18));
+        finishButton.setPreferredSize(new Dimension(200, 60));
+        finishButton.addActionListener(e -> handleSignupStep2());
+        JPanel bottomPanel = new JPanel();
+        bottomPanel.add(finishButton);
+        panel.add(bottomPanel, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private JPanel createMainAppPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+        JLabel userStatusLabel = new JLabel();
+        JButton logoutButton = new JButton("로그아웃");
+        topPanel.add(userStatusLabel); topPanel.add(logoutButton);
+        logoutButton.addActionListener(e -> logoutUser());
+        panel.add(topPanel, BorderLayout.NORTH);
+
+        panel.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentShown(ComponentEvent e) {
+                if (isAdmin) {
+                    userStatusLabel.setText("관리자 계정 접속 중 ");
+                    userStatusLabel.setForeground(Color.BLUE);
+                } else if (currentUser != null) {
+                    userStatusLabel.setText(currentUser + "님 환영합니다 ");
+                    userStatusLabel.setForeground(Color.BLACK);
+                }
+            }
+        });
+
+        JPanel buttonContainer = new JPanel(new BorderLayout());
+        JPanel buttonPanel = new JPanel(new GridLayout(4, 1, 5, 5));
+        buttonPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        String[] sections = {"음식 메뉴", "좋아하는 음식", "주문 내역", "주문 이력"};
+        String[] cardNames = {"FOOD_MENU_SCREEN", "FAVORITE_FOOD_SCREEN", "CURRENT_ORDER_SCREEN", "ORDER_HISTORY_SCREEN"};
+        for (int i = 0; i < sections.length; i++) {
+            JButton btn = new JButton(sections[i]);
+            btn.setFont(new Font("맑은 고딕", Font.BOLD, 12));
+            btn.setPreferredSize(new Dimension(150, 40));
+            final String cardName = cardNames[i];
+            btn.addActionListener(e -> cardLayout.show(mainPanel, cardName));
+            buttonPanel.add(btn);
+        }
+        buttonContainer.add(buttonPanel, BorderLayout.NORTH);
+        panel.add(buttonContainer, BorderLayout.WEST);
+
+        JLabel imageLabel = new JLabel();
+        imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        try {
+            ImageIcon icon = new ImageIcon("image01.png");
+            panel.addComponentListener(new ComponentAdapter() {
+                @Override
+                public void componentResized(ComponentEvent e) {
+                    int w = panel.getWidth() - buttonContainer.getPreferredSize().width;
+                    int h = panel.getHeight() - topPanel.getPreferredSize().height;
+                    if(w > 0 && h > 0) imageLabel.setIcon(new ImageIcon(icon.getImage().getScaledInstance(w - 50, h - 50, Image.SCALE_SMOOTH)));
+                }
+            });
+            panel.add(imageLabel, BorderLayout.CENTER);
+        } catch (Exception e) {
+            panel.add(new JLabel("이미지를 불러올 수 없습니다.", SwingConstants.CENTER), BorderLayout.CENTER);
+        }
+        return panel;
+    }
+
+    private JPanel createFoodMenuScreen() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(Color.WHITE);
+
+        // 상단 타이틀
+        JLabel titleLabel = new JLabel("음식 메뉴를 선택해주세요", JLabel.CENTER);
+        titleLabel.setFont(new Font("맑은 고딕", Font.BOLD, 28));
+        titleLabel.setForeground(new Color(139, 69, 19));
+        titleLabel.setBorder(BorderFactory.createEmptyBorder(15, 0, 15, 0));
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        // 중앙 영역 (카테고리 버튼 + 음식 목록)
+        JPanel centerPanel = new JPanel(new BorderLayout());
+        centerPanel.setBackground(Color.WHITE);
+
+        // 카테고리 버튼 패널 (왼쪽)
+        JPanel categoryPanel = createCategoryButtonPanel();
+        centerPanel.add(categoryPanel, BorderLayout.WEST);
+
+        // 음식 표시 패널 (중앙) - BoxLayout으로 변경하여 행별로 배치
+        foodDisplayPanel = new JPanel();
+        foodDisplayPanel.setLayout(new BoxLayout(foodDisplayPanel, BoxLayout.Y_AXIS));
+        foodDisplayPanel.setBackground(Color.WHITE);
+        foodDisplayPanel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+        
+        // 초기에는 전체 메뉴 표시
+        updateFoodDisplay("전체");
+        
+        JScrollPane scrollPane = new JScrollPane(foodDisplayPanel);
+        scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        scrollPane.setBorder(BorderFactory.createLineBorder(new Color(200, 200, 200), 1));
+        
+        centerPanel.add(scrollPane, BorderLayout.CENTER);
+        panel.add(centerPanel, BorderLayout.CENTER);
+
+        // 하단 버튼
+        JButton backButton = new JButton("메인 화면으로 돌아가기");
+        backButton.setFont(new Font("맑은 고딕", Font.BOLD, 16));
+        backButton.setPreferredSize(new Dimension(220, 50));
+        backButton.setBackground(new Color(70, 130, 180));
+        backButton.setForeground(Color.WHITE);
+        backButton.setFocusPainted(false);
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "MAINAPP"));
+        
+        JPanel southPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        southPanel.setBackground(Color.WHITE);
+        southPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        southPanel.add(backButton);
+        panel.add(southPanel, BorderLayout.SOUTH);
+
+        return panel;
+    }
+
+    // 카테고리 버튼 패널 생성
+    private JPanel createCategoryButtonPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(new Color(245, 245, 245));
+        panel.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createEmptyBorder(20, 10, 20, 10),
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1)
+        ));
+        panel.setPreferredSize(new Dimension(180, 0));
+
+        // 카테고리 제목
+        JLabel categoryTitle = new JLabel("카테고리", JLabel.CENTER);
+        categoryTitle.setFont(new Font("맑은 고딕", Font.BOLD, 18));
+        categoryTitle.setForeground(new Color(139, 69, 19));
+        categoryTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
+        categoryTitle.setBorder(BorderFactory.createEmptyBorder(0, 0, 15, 0));
+        panel.add(categoryTitle);
+
+        // 구분선
+        JSeparator separator = new JSeparator();
+        separator.setMaximumSize(new Dimension(160, 2));
+        panel.add(separator);
+        panel.add(Box.createVerticalStrut(10));
+
+        // 카테고리 버튼들
+        String[] categories = {"전체", "분식", "패스트푸드", "찜/탕", "구이/볶음", 
+                              "돈까스", "회/해물", "밥류", "면류", "족발/보쌈"};
+        
+        ButtonGroup buttonGroup = new ButtonGroup();
+        
+        for (String category : categories) {
+            JToggleButton categoryBtn = new JToggleButton(category);
+            categoryBtn.setFont(new Font("맑은 고딕", Font.PLAIN, 15));
+            categoryBtn.setMaximumSize(new Dimension(160, 45));
+            categoryBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
+            categoryBtn.setFocusPainted(false);
+            categoryBtn.setBackground(Color.WHITE);
+            categoryBtn.setForeground(new Color(51, 51, 51));
+            
+            // 선택된 버튼 스타일
+            categoryBtn.addItemListener(e -> {
+                if (categoryBtn.isSelected()) {
+                    categoryBtn.setBackground(new Color(255, 140, 0));
+                    categoryBtn.setForeground(Color.WHITE);
+                    categoryBtn.setFont(new Font("맑은 고딕", Font.BOLD, 15));
+                } else {
+                    categoryBtn.setBackground(Color.WHITE);
+                    categoryBtn.setForeground(new Color(51, 51, 51));
+                    categoryBtn.setFont(new Font("맑은 고딕", Font.PLAIN, 15));
+                }
+            });
+            
+            // 버튼 클릭 이벤트
+            categoryBtn.addActionListener(e -> {
+                currentSelectedCategory = category;
+                updateFoodDisplay(category);
+            });
+            
+            buttonGroup.add(categoryBtn);
+            panel.add(categoryBtn);
+            panel.add(Box.createVerticalStrut(5));
+            
+            // 첫 번째 버튼(전체)을 기본 선택
+            if (category.equals("전체")) {
+                categoryBtn.setSelected(true);
+            }
+        }
+
+        panel.add(Box.createVerticalGlue()); // 남은 공간을 채움
+        
+        return panel;
+    }
+
+    // 음식 표시를 업데이트하는 메서드
+    private void updateFoodDisplay(String category) {
+        foodDisplayPanel.removeAll();
+        
+        List<String> foodsToDisplay = new ArrayList<>();
+        
+        if (category.equals("전체")) {
+            // 전체 메뉴 표시
+            foodsToDisplay.addAll(menuData.keySet());
+        } else {
+            // 선택된 카테고리의 메뉴만 표시
+            foodsToDisplay = categoryToFoodMap.getOrDefault(category, new ArrayList<>());
+        }
+        
+        if (foodsToDisplay.isEmpty()) {
+            JLabel emptyLabel = new JLabel("등록된 메뉴가 없습니다.", JLabel.CENTER);
+            emptyLabel.setFont(new Font("맑은 고딕", Font.PLAIN, 18));
+            emptyLabel.setForeground(Color.GRAY);
+            foodDisplayPanel.add(emptyLabel);
+        } else {
+            // 4개씩 한 줄로 배치
+            int count = 0;
+            JPanel rowPanel = null;
+            
+            for (String foodName : foodsToDisplay) {
+                if (count % 4 == 0) {
+                    // 새로운 행 시작
+                    rowPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 15));
+                    rowPanel.setBackground(Color.WHITE);
+                    foodDisplayPanel.add(rowPanel);
+                }
+                
+                MenuItem item = menuData.get(foodName);
+                if (item != null) {
+                    rowPanel.add(new MenuPanel(item, this));
+                    count++;
+                }
+            }
+        }
+        
+        foodDisplayPanel.revalidate();
+        foodDisplayPanel.repaint();
+    }
+
+    // [좋아하는 음식 화면]: 좌우 분할 구조 + 통합 정렬
+    private JPanel createFavoriteFoodScreen() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+
+        JLabel titleLabel = new JLabel("❤️ 좋아하는 음식 & 추천 메뉴", SwingConstants.CENTER);
+        titleLabel.setFont(new Font("맑은 고딕", Font.BOLD, 24));
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        JPanel centerSplitPanel = new JPanel(new GridLayout(1, 2, 20, 0));
+
+        // [왼쪽] 내 찜 목록
+        JPanel leftContainer = new JPanel(new BorderLayout());
+        leftContainer.setBorder(BorderFactory.createTitledBorder("내 찜 목록 (My Favorites)"));
+        favoriteListPanel = new JPanel();
+        favoriteListPanel.setLayout(new BoxLayout(favoriteListPanel, BoxLayout.Y_AXIS));
+        favoriteListPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JScrollPane leftScrollPane = new JScrollPane(favoriteListPanel);
+        leftContainer.add(leftScrollPane, BorderLayout.CENTER);
+        
+        // [오른쪽] 추천 메뉴
+        JPanel rightContainer = createRightRecommendationPanel();
+        
+        centerSplitPanel.add(leftContainer);
+        centerSplitPanel.add(rightContainer);
+        panel.add(centerSplitPanel, BorderLayout.CENTER);
+
+        // 화면 보일 때 업데이트
+        panel.addComponentListener(new ComponentAdapter() {
+            public void componentShown(ComponentEvent e) {
+                System.out.println("\n============================================================");
+                System.out.println("좋아하는 음식 화면 열림");
+                System.out.println("currentUser = " + currentUser);
+                
+                if (currentUser != null) {
+                    try {
+                        java.sql.Connection conn = DBConnect.getInstance().getConnection();
+                        java.sql.PreparedStatement pstmt = conn.prepareStatement("SELECT user_id FROM users WHERE username = ?");
+                        pstmt.setString(1, currentUser);
+                        java.sql.ResultSet rs = pstmt.executeQuery();
+                        
+                        if (rs.next()) {
+                            int userId = rs.getInt("user_id");
+                            System.out.println("DB user_id = " + userId);
+                            
+                            java.sql.PreparedStatement pstmt2 = conn.prepareStatement("SELECT food_name FROM favorites WHERE user_id = ?");
+                            pstmt2.setInt(1, userId);
+                            java.sql.ResultSet rs2 = pstmt2.executeQuery();
+                            
+                            System.out.println("DB 찜 목록:");
+                            int count = 0;
+                            while (rs2.next()) {
+                                System.out.println("  " + (++count) + ". " + rs2.getString("food_name"));
+                            }
+                            if (count == 0) System.out.println("  (비어있음)");
+                            rs2.close();
+                            pstmt2.close();
+                        } else {
+                            System.out.println("ERROR: users 테이블에 사용자 없음");
+                        }
+                        rs.close();
+                        pstmt.close();
+                    } catch (Exception ex) {
+                        System.err.println("DB 확인 실패: " + ex.getMessage());
+                    }
+                }
+                
+                refreshBothLists();
+                System.out.println("============================================================\n");
+            }
+        });
+
+        JButton backButton = new JButton("메인 화면으로 돌아가기");
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "MAINAPP"));
+        JPanel southPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        southPanel.add(backButton);
+        panel.add(southPanel, BorderLayout.SOUTH);
+
+        return panel;
+    }
+    
+    // 오른쪽 패널 생성: JList 제거하고 JPanel 기반으로 변경, 정렬 체크박스에 리스너 추가
+    private JPanel createRightRecommendationPanel() {
+        JPanel container = new JPanel(new BorderLayout());
+        container.setBorder(BorderFactory.createTitledBorder("추천 메뉴 (Category Based)"));
+
+        JPanel innerContent = new JPanel(new BorderLayout(10, 0));
+
+        // 추천 목록을 담을 패널 (왼쪽과 동일한 구조)
+        recommendationListPanel = new JPanel();
+        recommendationListPanel.setLayout(new BoxLayout(recommendationListPanel, BoxLayout.Y_AXIS));
+        recommendationListPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        
+        JScrollPane listScrollPane = new JScrollPane(recommendationListPanel);
+        innerContent.add(listScrollPane, BorderLayout.CENTER);
+
+        // 정렬/제어 패널
+        JPanel controlPanel = new JPanel();
+        controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
+        controlPanel.setBorder(BorderFactory.createEmptyBorder(10, 5, 10, 5));
+        controlPanel.setPreferredSize(new Dimension(120, 0));
+
+        JLabel sortLabel = new JLabel("정렬 기준");
+        sortLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        controlPanel.add(sortLabel);
+        controlPanel.add(Box.createRigidArea(new Dimension(0, 10)));
+
+        ButtonGroup sortGroup = new ButtonGroup();
+        frequentOrderBox = new JCheckBox("자주 주문");
+        recentOrderBox = new JCheckBox("최근 주문");
+        recentAddBox = new JCheckBox("최근 추가");
+        
+        recentOrderBox.setSelected(true); // 기본값
+
+        sortGroup.add(frequentOrderBox);
+        sortGroup.add(recentOrderBox);
+        sortGroup.add(recentAddBox);
+
+        // 체크박스에 즉시 반응하는 리스너 추가 (적용 버튼 없이 작동)
+        ActionListener sortListener = e -> refreshBothLists();
+        frequentOrderBox.addActionListener(sortListener);
+        recentOrderBox.addActionListener(sortListener);
+        recentAddBox.addActionListener(sortListener);
+
+        controlPanel.add(frequentOrderBox);
+        controlPanel.add(recentOrderBox);
+        controlPanel.add(recentAddBox);
+        
+        innerContent.add(controlPanel, BorderLayout.EAST);
+        container.add(innerContent, BorderLayout.CENTER);
+        return container;
+    }
+
+    // 좌우 리스트를 모두 새로고침하는 메서드
+    private void refreshBothLists() {
+    	loadFavoritesFromDB();
+        loadRecommendationsFromDB();
+        updateFavoriteFoodDisplay();
+        updateRecommendationList();
+    }
+
+    private void loadFavoritesFromDB() {
+        if (currentUser == null) return;
+        
+        currentUserFavoriteFoods.clear();
+        String query = "SELECT food_name FROM favorites f " +
+                      "JOIN users u ON f.user_id = u.user_id " +
+                      "WHERE u.username = ? " +
+                      "ORDER BY f.added_at DESC";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    currentUserFavoriteFoods.add(rs.getString("food_name"));
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+//    private Set<String> recommendedFoodsFromDB = new HashSet<>();
+
+    private void loadRecommendationsFromDB() {
+        if (currentUser == null) return;
+        
+        System.out.println("\n[추천 메뉴 생성 시작]");
+        System.out.println("  사용자: " + currentUser);
+        
+        recommendedFoodsFromDB.clear();
+        
+        // 1. 찜한 음식과 비슷한 카테고리의 음식 추천
+        Set<String> categoryBasedRecommendations = getCategoryBasedRecommendations();
+        System.out.println("  카테고리 기반 추천: " + categoryBasedRecommendations.size() + "개");
+        
+        // 2. 자주 주문한 음식과 비슷한 음식 추천
+        Set<String> orderBasedRecommendations = getOrderBasedRecommendations();
+        System.out.println("  주문 기반 추천: " + orderBasedRecommendations.size() + "개");
+        
+        // 3. 다른 사용자들이 같이 찜한 음식 추천 (협업 필터링)
+        Set<String> collaborativeRecommendations = getCollaborativeRecommendations();
+        System.out.println("  협업 필터링 추천: " + collaborativeRecommendations.size() + "개");
+        
+        // 우선순위: 협업 필터링 > 주문 기반 > 카테고리 기반
+        recommendedFoodsFromDB.addAll(collaborativeRecommendations);
+        recommendedFoodsFromDB.addAll(orderBasedRecommendations);
+        recommendedFoodsFromDB.addAll(categoryBasedRecommendations);
+        
+        // 이미 찜한 음식 제외
+        recommendedFoodsFromDB.removeAll(currentUserFavoriteFoods);
+        
+        System.out.println("  최종 추천: " + recommendedFoodsFromDB.size() + "개");
+        System.out.println("[추천 메뉴 생성 완료]\n");
+    }
+    
+    // 카테고리 기반 추천: 내가 찜한 음식과 같은 카테고리의 음식
+    private Set<String> getCategoryBasedRecommendations() {
+        Set<String> recommendations = new HashSet<>();
+        
+        String query = "SELECT DISTINCT m2.food_name " +
+                      "FROM menu_items m1 " +
+                      "JOIN menu_items m2 ON m1.category = m2.category " +
+                      "JOIN favorites f ON m1.food_name = f.food_name " +
+                      "WHERE f.user_id = (SELECT user_id FROM users WHERE username = ?) " +
+                      "AND m2.food_name NOT IN (SELECT food_name FROM favorites WHERE user_id = (SELECT user_id FROM users WHERE username = ?)) " +
+                      "LIMIT 10";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            pstmt.setString(2, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    recommendations.add(rs.getString("food_name"));
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("  카테고리 기반 추천 실패: " + e.getMessage());
+        }
+        
+        return recommendations;
+    }
+    
+    // 주문 기반 추천: 내가 자주 주문한 음식과 같은 카테고리의 음식
+    private Set<String> getOrderBasedRecommendations() {
+        Set<String> recommendations = new HashSet<>();
+        
+        String query = "SELECT DISTINCT m2.food_name " +
+                      "FROM order_history oh " +
+                      "JOIN menu_items m1 ON oh.food_name = m1.food_name " +
+                      "JOIN menu_items m2 ON m1.category = m2.category " +
+                      "WHERE oh.user_id = (SELECT user_id FROM users WHERE username = ?) " +
+                      "AND m2.food_name NOT IN (SELECT food_name FROM favorites WHERE user_id = (SELECT user_id FROM users WHERE username = ?)) " +
+                      "GROUP BY m2.food_name " +
+                      "ORDER BY COUNT(*) DESC " +
+                      "LIMIT 10";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            pstmt.setString(2, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    recommendations.add(rs.getString("food_name"));
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("  주문 기반 추천 실패: " + e.getMessage());
+        }
+        
+        return recommendations;
+    }
+    
+    // 협업 필터링: 나와 비슷한 취향의 사용자들이 찜한 음식
+    private Set<String> getCollaborativeRecommendations() {
+        Set<String> recommendations = new HashSet<>();
+        
+        String query = "SELECT f2.food_name, COUNT(DISTINCT f2.user_id) as score " +
+                      "FROM favorites f1 " +
+                      "JOIN favorites f2 ON f1.food_name = f2.food_name " +
+                      "JOIN favorites f3 ON f2.user_id = f3.user_id " +
+                      "WHERE f1.user_id = (SELECT user_id FROM users WHERE username = ?) " +
+                      "AND f2.user_id != (SELECT user_id FROM users WHERE username = ?) " +
+                      "AND f3.food_name NOT IN (SELECT food_name FROM favorites WHERE user_id = (SELECT user_id FROM users WHERE username = ?)) " +
+                      "GROUP BY f2.food_name " +
+                      "ORDER BY score DESC " +
+                      "LIMIT 10";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            pstmt.setString(2, currentUser);
+            pstmt.setString(3, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    recommendations.add(rs.getString("food_name"));
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("  협업 필터링 추천 실패: " + e.getMessage());
+        }
+        
+        return recommendations;
+    }
+
+    // 정렬 로직 (공통 사용)
+    private List<String> sortFoodItems(Collection<String> items) {
+        List<String> sortedList = new ArrayList<>(items);
+        
+        if (currentUser == null) return sortedList;
+
+        if (frequentOrderBox.isSelected()) {
+            // 자주 주문한 순 - DB에서 조회
+            Map<String, Integer> frequencyMap = getOrderFrequencyFromDB();
+            sortedList.sort((a, b) -> {
+                int countA = frequencyMap.getOrDefault(a, 0);
+                int countB = frequencyMap.getOrDefault(b, 0);
+                return Integer.compare(countB, countA);
+            });
+            
+        } else if (recentOrderBox.isSelected()) {
+            // 최근 주문한 순 - DB에서 조회
+            Map<String, LocalDateTime> lastOrderMap = getLastOrderTimeFromDB();
+            sortedList.sort((a, b) -> {
+                LocalDateTime timeA = lastOrderMap.getOrDefault(a, LocalDateTime.MIN);
+                LocalDateTime timeB = lastOrderMap.getOrDefault(b, LocalDateTime.MIN);
+                return timeB.compareTo(timeA);
+            });
+            
+        } else if (recentAddBox.isSelected()) {
+            // 최근 추가한 순 - DB에서 조회
+            Map<String, LocalDateTime> addedTimeMap = getFavoriteAddedTimeFromDB();
+            sortedList.sort((a, b) -> {
+                LocalDateTime timeA = addedTimeMap.getOrDefault(a, LocalDateTime.MIN);
+                LocalDateTime timeB = addedTimeMap.getOrDefault(b, LocalDateTime.MIN);
+                return timeB.compareTo(timeA);
+            });
+        }
+        
+        return sortedList;
+    }
+    
+    // DB에서 주문 빈도 가져오기
+    private Map<String, Integer> getOrderFrequencyFromDB() {
+        Map<String, Integer> frequencyMap = new HashMap<>();
+        
+        String query = "SELECT food_name, SUM(1) as order_count " +
+                      "FROM order_history " +
+                      "WHERE user_id = (SELECT user_id FROM users WHERE username = ?) " +
+                      "GROUP BY food_name";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    frequencyMap.put(rs.getString("food_name"), rs.getInt("order_count"));
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("주문 빈도 조회 실패: " + e.getMessage());
+        }
+        
+        return frequencyMap;
+    }
+    
+    // DB에서 최근 주문 시간 가져오기
+    private Map<String, LocalDateTime> getLastOrderTimeFromDB() {
+        Map<String, LocalDateTime> lastOrderMap = new HashMap<>();
+        
+        String query = "SELECT food_name, MAX(order_date) as last_order " +
+                      "FROM order_history " +
+                      "WHERE user_id = (SELECT user_id FROM users WHERE username = ?) " +
+                      "GROUP BY food_name";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    java.sql.Timestamp timestamp = rs.getTimestamp("last_order");
+                    if (timestamp != null) {
+                        lastOrderMap.put(rs.getString("food_name"), timestamp.toLocalDateTime());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("최근 주문 조회 실패: " + e.getMessage());
+        }
+        
+        return lastOrderMap;
+    }
+    
+    // DB에서 찜 추가 시간 가져오기
+    private Map<String, LocalDateTime> getFavoriteAddedTimeFromDB() {
+        Map<String, LocalDateTime> addedTimeMap = new HashMap<>();
+        
+        String query = "SELECT food_name, added_at " +
+                      "FROM favorites " +
+                      "WHERE user_id = (SELECT user_id FROM users WHERE username = ?)";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            try (java.sql.ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    java.sql.Timestamp timestamp = rs.getTimestamp("added_at");
+                    if (timestamp != null) {
+                        addedTimeMap.put(rs.getString("food_name"), timestamp.toLocalDateTime());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("찜 추가 시간 조회 실패: " + e.getMessage());
+        }
+        
+        return addedTimeMap;
+    }
+
+    private JPanel createCurrentOrderScreen() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+        JLabel titleLabel = new JLabel("현재 주문 내역", SwingConstants.CENTER);
+        titleLabel.setFont(new Font("맑은 고딕", Font.BOLD, 24));
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        orderListPanel = new JPanel();
+        orderListPanel.setLayout(new BoxLayout(orderListPanel, BoxLayout.Y_AXIS));
+        orderListPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JScrollPane orderScrollPane = new JScrollPane(orderListPanel);
+        orderScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        panel.add(orderScrollPane, BorderLayout.CENTER);
+
+        JPanel southPanel = new JPanel(new BorderLayout());
+        JPanel infoPanel = new JPanel(new GridLayout(2, 1));
+        totalOrderCountLabel = new JLabel("총 주문 갯수: 0개", SwingConstants.RIGHT);
+        totalOrderPriceLabel = new JLabel("총 결제 금액: 0원", SwingConstants.RIGHT);
+        totalOrderPriceLabel.setFont(new Font("맑은 고딕", Font.BOLD, 20));
+        infoPanel.add(totalOrderCountLabel); infoPanel.add(totalOrderPriceLabel);
+        southPanel.add(infoPanel, BorderLayout.NORTH);
+
+        JButton paymentButton = new JButton("결제하기");
+        paymentButton.setFont(new Font("맑은 고딕", Font.BOLD, 24));
+        paymentButton.addActionListener(e -> {
+            if (currentOrderList.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "주문 내역이 없습니다.", "알림", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            totalPrice = currentOrderList.stream().mapToLong(FoodOrder::getTotalPrice).sum();
+            cardLayout.show(mainPanel, "PAYMENT_SCREEN");
+        });
+        JButton backButton = new JButton("메뉴 선택으로 돌아가기");
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "FOOD_MENU_SCREEN"));
+        JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        buttonRow.add(backButton); buttonRow.add(paymentButton);
+        southPanel.add(buttonRow, BorderLayout.SOUTH);
+        panel.add(southPanel, BorderLayout.SOUTH);
+
+        panel.addComponentListener(new ComponentAdapter() {
+            public void componentShown(ComponentEvent e) { updateCurrentOrderDisplay(); }
+        });
+        return panel;
+    }
+
+    private JPanel createOrderHistoryScreen() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+        JLabel titleLabel = new JLabel("주문 이력", SwingConstants.CENTER);
+        titleLabel.setFont(new Font("맑은 고딕", Font.BOLD, 24));
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        historyListPanel = new JPanel();
+        historyListPanel.setLayout(new BoxLayout(historyListPanel, BoxLayout.Y_AXIS));
+        historyListPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        panel.add(new JScrollPane(historyListPanel), BorderLayout.CENTER);
+
+        panel.addComponentListener(new ComponentAdapter() {
+            public void componentShown(ComponentEvent e) { updateOrderHistoryDisplay(); }
+        });
+
+        JButton backButton = new JButton("메인 화면으로 돌아가기");
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "MAINAPP"));
+        JPanel southPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        southPanel.add(backButton);
+        panel.add(southPanel, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private JPanel createPaymentScreen() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(50, 200, 50, 200));
+        JLabel titleLabel = new JLabel("결제 수단 선택", SwingConstants.CENTER);
+        titleLabel.setFont(new Font("맑은 고딕", Font.BOLD, 30));
+        panel.add(titleLabel, BorderLayout.NORTH);
+
+        JPanel centerPanel = new JPanel(new GridLayout(3, 1, 20, 20));
+        centerPanel.setBorder(BorderFactory.createEmptyBorder(50, 0, 50, 0));
+        JButton cardButton = new JButton("카드");
+        JButton cashButton = new JButton("현금");
+        JButton couponButton = new JButton("쿠폰");
+        cardButton.setFont(new Font("맑은 고딕", Font.BOLD, 20));
+        cashButton.setFont(new Font("맑은 고딕", Font.BOLD, 20));
+        couponButton.setFont(new Font("맑은 고딕", Font.BOLD, 20));
+
+        cardButton.addActionListener(e -> completePayment("카드"));
+        cashButton.addActionListener(e -> completePayment("현금"));
+        couponButton.addActionListener(e -> {
+            String[] options = {"10000원", "5000원", "1000원", "취소"};
+            int choice = JOptionPane.showOptionDialog(panel, "사용할 쿠폰을 선택하세요:", "쿠폰 선택",
+                    JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
+            int discount = 0;
+            switch (choice) { case 0: discount = 10000; break; case 1: discount = 5000; break; case 2: discount = 1000; break; default: return; }
+            if (totalPrice >= discount) {
+                totalPrice -= discount;
+                JOptionPane.showMessageDialog(panel, String.format("%,d원 쿠폰이 적용되었습니다.\n남은 결제 금액: %,d원", discount, totalPrice));
+                if (totalPrice == 0) completePayment("쿠폰 (전액 할인)");
+            } else {
+                JOptionPane.showMessageDialog(panel, "쿠폰 금액이 결제 금액보다 큽니다.", "적용 불가", JOptionPane.WARNING_MESSAGE);
+            }
+        });
+        centerPanel.add(cardButton); centerPanel.add(cashButton); centerPanel.add(couponButton);
+        panel.add(centerPanel, BorderLayout.CENTER);
+
+        JButton backButton = new JButton("주문 내역으로 돌아가기");
+        backButton.addActionListener(e -> cardLayout.show(mainPanel, "CURRENT_ORDER_SCREEN"));
+        JPanel southPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        southPanel.add(backButton);
+        panel.add(southPanel, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    // -----------------------------------------------------------
+    // 로직 및 이벤트 핸들러
+    // -----------------------------------------------------------
+
+    private void updateFavoriteFoodDisplay() {
+        favoriteListPanel.removeAll();
+        
+        if (currentUser == null && !isAdmin) {
+            favoriteListPanel.add(new JLabel("로그인 필요"));
+        } else if (currentUserFavoriteFoods.isEmpty()) {
+            favoriteListPanel.add(new JLabel("찜한 음식이 없습니다."));
+        } else {
+            // 정렬 로직 적용
+            List<String> sortedFavorites = sortFoodItems(currentUserFavoriteFoods);
+
+            for (String foodName : sortedFavorites) {
+                JPanel itemPanel = new JPanel(new BorderLayout(10, 0));
+                itemPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, Color.LIGHT_GRAY));
+                itemPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+
+                JLabel foodLabel = new JLabel("⭐ " + foodName);
+                foodLabel.setFont(new Font("맑은 고딕", Font.BOLD, 16));
+                itemPanel.add(foodLabel, BorderLayout.CENTER);
+                
+                JButton deleteButton = new JButton("찜 해제");
+                deleteButton.setMargin(new Insets(2, 5, 2, 5));
+                deleteButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                
+                deleteButton.addActionListener(e -> {
+                    currentUserFavoriteFoods.remove(foodName);
+                    deleteFavoriteFromDB(foodName);
+                    if(currentUser != null) {
+                        allFavoriteFoods.put(currentUser, currentUserFavoriteFoods);
+                        saveAllFavoriteFoods();
+                    }
+                    refreshBothLists();
+                });
+                
+                JButton reorderButton = new JButton("재주문");
+                reorderButton.setMargin(new Insets(2, 5, 2, 5));
+                reorderButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                MenuItem itemToReorder = menuData.get(foodName); 
+                reorderButton.addActionListener(e -> {
+                    if (itemToReorder != null) showShopSelection(itemToReorder);
+                });
+
+                JPanel buttonGroup = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
+                buttonGroup.add(reorderButton);
+                buttonGroup.add(deleteButton);
+                
+                itemPanel.add(buttonGroup, BorderLayout.EAST);
+                favoriteListPanel.add(itemPanel);
+            }
+        }
+        favoriteListPanel.revalidate();
+        favoriteListPanel.repaint();
+    }
+
+    // 추천 리스트 업데이트 (UI 개선 + 기능 추가 + 정렬 적용)
+    private void updateRecommendationList() {
+        recommendationListPanel.removeAll();
+        
+        if (currentUser == null || isAdmin) {
+            recommendationListPanel.add(new JLabel("회원 전용 기능입니다."));
+            recommendationListPanel.revalidate(); 
+            recommendationListPanel.repaint();
+            return;
+        }
+        
+        // DB에서 로드한 추천 목록 사용
+        Set<String> recommendedFoods = new HashSet<>(recommendedFoodsFromDB);
+        
+        // DB 추천이 없으면 기존 로직 사용
+        if (recommendedFoods.isEmpty()) {
+            Set<String> myCategories = userCategoryData.getOrDefault(currentUser, new HashSet<>());
+            if (myCategories.isEmpty()) {
+                recommendedFoods.addAll(menuData.keySet());
+            } else {
+                for(String cat : myCategories) {
+                    List<String> foods = categoryToFoodMap.get(cat);
+                    if(foods != null) recommendedFoods.addAll(foods);
+                }
+            }
+        }
+
+        if(recommendedFoods.isEmpty()) {
+            recommendationListPanel.add(new JLabel("추천할 메뉴가 없습니다."));
+        } else {
+            List<String> sortedRecs = sortFoodItems(recommendedFoods);
+
+            for(String foodName : sortedRecs) {
+                if(!menuData.containsKey(foodName)) continue;
+
+                JPanel itemPanel = new JPanel(new BorderLayout(10, 0));
+                itemPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, Color.LIGHT_GRAY));
+                itemPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+
+                boolean isFavorite = currentUserFavoriteFoods.contains(foodName);
+                JLabel foodLabel = new JLabel((isFavorite ? "⭐ " : "") + foodName);
+                foodLabel.setFont(new Font("맑은 고딕", Font.PLAIN, 16));
+                itemPanel.add(foodLabel, BorderLayout.CENTER);
+
+                JButton likeButton = new JButton(isFavorite ? "찜 해제" : "찜 하기");
+                likeButton.setMargin(new Insets(2, 5, 2, 5));
+                likeButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                likeButton.setForeground(isFavorite ? Color.RED : Color.BLACK);
+
+                likeButton.addActionListener(e -> {
+                    if (isFavorite) {
+                        currentUserFavoriteFoods.remove(foodName);
+                        deleteFavoriteFromDB(foodName);
+                    } else {
+                        currentUserFavoriteFoods.add(foodName);
+                        addFavoriteToDB(foodName);
+                    }
+                    if(currentUser != null) {
+                        allFavoriteFoods.put(currentUser, currentUserFavoriteFoods);
+                        saveAllFavoriteFoods();
+                    }
+                    refreshBothLists();
+                });
+
+                JButton orderButton = new JButton("주문");
+                orderButton.setMargin(new Insets(2, 5, 2, 5));
+                orderButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                MenuItem itemToOrder = menuData.get(foodName);
+                orderButton.addActionListener(e -> {
+                    if(itemToOrder != null) showShopSelection(itemToOrder);
+                });
+
+                JPanel buttonGroup = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
+                buttonGroup.add(orderButton);
+                buttonGroup.add(likeButton);
+
+                itemPanel.add(buttonGroup, BorderLayout.EAST);
+                recommendationListPanel.add(itemPanel);
+            }
+        }
+        recommendationListPanel.revalidate();
+        recommendationListPanel.repaint();
+    }
+
+    private void updateCurrentOrderDisplay() {
+        orderListPanel.removeAll();
+        long total = 0;
+        int totalCount = 0;
+        if (currentOrderList.isEmpty()) {
+            JLabel emptyLabel = new JLabel("현재 주문 내역이 비어있습니다.", SwingConstants.CENTER);
+            emptyLabel.setFont(new Font("맑은 고딕", Font.PLAIN, 18));
+            orderListPanel.add(emptyLabel);
+        } else {
+            for (FoodOrder order : currentOrderList) {
+                JPanel itemPanel = new JPanel(new BorderLayout(10, 0));
+                itemPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, Color.LIGHT_GRAY));
+                itemPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+
+                JLabel orderLabel = new JLabel(String.format("%s (%s) - %,d원", order.foodName, order.shopName, order.unitPrice));
+                orderLabel.setFont(new Font("맑은 고딕", Font.PLAIN, 14));
+                itemPanel.add(orderLabel, BorderLayout.WEST);
+
+                JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
+                JLabel quantityLabel = new JLabel(String.valueOf(order.quantity), SwingConstants.CENTER);
+                quantityLabel.setPreferredSize(new Dimension(30, 20));
+                quantityLabel.setFont(new Font("맑은 고딕", Font.BOLD, 12));
+
+                JButton minusButton = new JButton("-");
+                minusButton.setMargin(new Insets(1, 3, 1, 3));
+                minusButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                minusButton.addActionListener(e -> {
+                    if (order.quantity > 1) { order.quantity--; updateCurrentOrderDisplay(); }
+                });
+
+                JButton plusButton = new JButton("+");
+                plusButton.setMargin(new Insets(1, 3, 1, 3));
+                plusButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                plusButton.addActionListener(e -> {
+                    if (order.quantity < 99) { order.quantity++; updateCurrentOrderDisplay(); }
+                });
+
+                JLabel itemTotalPriceLabel = new JLabel(String.format("%,d원", order.getTotalPrice()));
+                itemTotalPriceLabel.setFont(new Font("맑은 고딕", Font.BOLD, 14));
+                itemTotalPriceLabel.setPreferredSize(new Dimension(80, 20));
+                itemTotalPriceLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+
+                JButton deleteButton = new JButton("삭제");
+                deleteButton.setMargin(new Insets(2, 5, 2, 5));
+                deleteButton.setFont(new Font("맑은 고딕", Font.BOLD, 10));
+                deleteButton.addActionListener(e -> {
+                    currentOrderList.remove(order);
+                    updateCurrentOrderDisplay();
+                });
+
+                controlPanel.add(itemTotalPriceLabel); controlPanel.add(minusButton);
+                controlPanel.add(quantityLabel); controlPanel.add(plusButton); controlPanel.add(deleteButton);
+                itemPanel.add(controlPanel, BorderLayout.EAST);
+                orderListPanel.add(itemPanel);
+                total += order.getTotalPrice(); totalCount += order.quantity;
+            }
+        }
+        totalOrderPriceLabel.setText("총 결제 금액: " + String.format("%,d", total) + "원");
+        totalOrderCountLabel.setText("총 주문 갯수: " + totalCount + "개");
+        orderListPanel.revalidate(); orderListPanel.repaint();
+    }
+
+    private void updateOrderHistoryDisplay() {
+        historyListPanel.removeAll();
+        if (orderHistoryList.isEmpty()) {
+            historyListPanel.add(new JLabel("저장된 주문 이력이 없습니다."));
+        } else {
+            for (int i = orderHistoryList.size() - 1; i >= 0; i--) {
+                OrderHistory history = orderHistoryList.get(i);
+                if (currentUser == null && !isAdmin) continue; 
+                if (currentUser != null && !history.username.equals(currentUser) && !isAdmin) continue;
+
+                JPanel historyContainer = new JPanel(new BorderLayout());
+                historyContainer.setBorder(BorderFactory.createLineBorder(Color.GRAY, 1));
+                JPanel headerPanel = new JPanel(new BorderLayout());
+                headerPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+                JLabel summaryLabel = new JLabel(String.format("[%s] 총: %,d원 (%s)",
+                        history.username, history.finalPrice, history.orderTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))));
+                summaryLabel.setFont(new Font("맑은 고딕", Font.BOLD, 14));
+                headerPanel.add(summaryLabel, BorderLayout.CENTER);
+                historyContainer.add(headerPanel, BorderLayout.NORTH);
+
+                JPanel detailPanel = new JPanel();
+                detailPanel.setLayout(new BoxLayout(detailPanel, BoxLayout.Y_AXIS));
+                detailPanel.setBorder(BorderFactory.createEmptyBorder(0, 10, 10, 10));
+
+                for (FoodOrder order : history.items) {
+                    JPanel orderItemPanel = new JPanel(new BorderLayout());
+                    orderItemPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+                    JLabel detailLabel = new JLabel(String.format(" - %s: %d개", order.foodName, order.quantity));
+                    orderItemPanel.add(detailLabel, BorderLayout.CENTER);
+                    
+                    JButton favoriteButton = new JButton(currentUserFavoriteFoods.contains(order.foodName) ? "★" : "☆");
+                    favoriteButton.setMargin(new Insets(1, 5, 1, 5));
+                    favoriteButton.setForeground(currentUserFavoriteFoods.contains(order.foodName) ? Color.RED : Color.BLACK);
+                    final String finalFoodName = order.foodName;
+                    favoriteButton.addActionListener(e -> {
+                        if (currentUser == null) {
+                            System.out.println("❌ 로그인 필요");
+                            return;
+                        }
+                        
+                        System.out.println("\n[주문 이력에서 찜 버튼 클릭]");
+                        System.out.println("  음식: " + finalFoodName);
+                        
+                        boolean isFavorite = currentUserFavoriteFoods.contains(finalFoodName);
+                        
+                        if (isFavorite) {
+                            // 찜 해제
+                            System.out.println("  동작: 찜 해제");
+                            currentUserFavoriteFoods.remove(finalFoodName);
+                            deleteFavoriteFromDB(finalFoodName);
+                        } else {
+                            // 찜 추가
+                            System.out.println("  동작: 찜 추가");
+                            currentUserFavoriteFoods.add(finalFoodName);
+                            addFavoriteToDB(finalFoodName);
+                        }
+                        
+                        allFavoriteFoods.put(currentUser, currentUserFavoriteFoods);
+                        saveAllFavoriteFoods();
+                        updateOrderHistoryDisplay();
+                        
+                        System.out.println("[주문 이력 찜 완료]\n");
+                    });
+                    orderItemPanel.add(favoriteButton, BorderLayout.EAST);
+                    detailPanel.add(orderItemPanel);
+                }
+                historyContainer.add(detailPanel, BorderLayout.CENTER);
+                historyListPanel.add(historyContainer);
+                historyListPanel.add(Box.createVerticalStrut(10));
+            }
+        }
+        historyListPanel.revalidate(); historyListPanel.repaint();
+    }
+
+    private void completePayment(String method) {
+        if (currentUser == null && !isAdmin) {
+            JOptionPane.showMessageDialog(this, "로그인 후 이용해주세요.", "오류", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (currentOrderList.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "결제할 주문 내역이 없습니다.", "알림", JOptionPane.WARNING_MESSAGE);
+            cardLayout.show(mainPanel, "MAINAPP");
+            return;
+        }
+        long finalPrice = totalPrice;
+        String username = (currentUser != null) ? currentUser : "관리자";
+        List<FoodOrder> completedItems = new ArrayList<>(currentOrderList);
+        OrderHistory newHistory = new OrderHistory(username, LocalDateTime.now(), completedItems, finalPrice, method);
+        orderHistoryList.add(newHistory);
+        saveOrderHistory();
+        
+        // DB에도 저장
+        saveOrderHistoryToDB(completedItems, username);
+        
+        currentOrderList.clear();
+        totalPrice = 0;
+        String message = method + "로 " + String.format("%,d", finalPrice) + "원 결제가 완료되었습니다.";
+        mainPanel.add(new PaymentCompletePanel(message), "PAYMENT_COMPLETE");
+        cardLayout.show(mainPanel, "PAYMENT_COMPLETE");
+    }
+
+    private void handleSignupStep1() {
+        String username = signupUserField.getText().trim();
+        String password = new String(signupPassField.getPassword()).trim();
+        if (username.isEmpty() || password.isEmpty()) { JOptionPane.showMessageDialog(this, "정보를 입력해주세요."); return; }
+        if (userData.containsKey(username) || username.equals("rhksflwk")) { JOptionPane.showMessageDialog(this, "이미 존재하는 사용자입니다."); return; }
+        tempSignupId = username; tempSignupPw = password;
+        for(JCheckBox chk : categoryCheckBoxes) chk.setSelected(false);
+        cardLayout.show(mainPanel, "SIGNUP_CATEGORY");
+    }
+
+    private void handleSignupStep2() {
+        userData.put(tempSignupId, tempSignupPw); 
+        saveUserData();
+        
+        // DB에 사용자 저장 추가
+        saveUserToDB(tempSignupId, tempSignupPw);
+        
+        Set<String> selectedCategories = new HashSet<>();
+        for (JCheckBox chk : categoryCheckBoxes) if (chk.isSelected()) selectedCategories.add(chk.getText());
+        userCategoryData.put(tempSignupId, selectedCategories); 
+        saveUserCategoryData();
+        
+        // DB에 카테고리 저장 추가
+        saveUserCategoriesToDB(tempSignupId, selectedCategories);
+        
+        JOptionPane.showMessageDialog(this, "회원가입 완료! 로그인 해주세요.");
+        cardLayout.show(mainPanel, "HOME");
+    }
+
+    private void handleLogin(JLabel errorLabel) {
+        String username = loginUserField.getText().trim();
+        String password = new String(loginPassField.getPassword()).trim();
+        if (username.equals("rhksflwk") && password.equals("wjqthr")) {
+            currentUser = null; isAdmin = true; currentUserFavoriteFoods = new HashSet<>(); cardLayout.show(mainPanel, "MAINAPP"); return;
+        }
+        if (userData.containsKey(username) && userData.get(username).equals(password)) {
+            currentUser = username; isAdmin = false; currentUserFavoriteFoods = allFavoriteFoods.getOrDefault(currentUser, new HashSet<>()); cardLayout.show(mainPanel, "MAINAPP");
+        } else errorLabel.setText("입력이 잘못되었습니다.");
+    }
+
+    private void logoutUser() {
+        currentUser = null; isAdmin = false; currentUserFavoriteFoods = new HashSet<>(); cardLayout.show(mainPanel, "HOME");
+    }
+
+    private class MenuPanel extends JPanel {
+        public MenuPanel(MenuItem item, JFrame frame) {
+            setLayout(new BorderLayout());
+            setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(200, 200, 200), 2),
+                BorderFactory.createEmptyBorder(5, 5, 5, 5)
+            ));
+            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            setBackground(Color.WHITE);
+            
+            // 고정 크기 설정
+            setPreferredSize(new Dimension(220, 200));
+            setMinimumSize(new Dimension(220, 200));
+            setMaximumSize(new Dimension(220, 200));
+            
+            // 이미지 패널
+            JPanel imagePanel = new JPanel(new BorderLayout());
+            imagePanel.setBackground(new Color(250, 250, 250));
+            imagePanel.setPreferredSize(new Dimension(210, 140));
+            
+            JLabel imageLabel = new JLabel();
+            imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
+            imageLabel.setVerticalAlignment(SwingConstants.CENTER);
+            
+            // 이미지 로드 시도
+            boolean imageLoaded = false;
+            try {
+                ImageIcon icon = new ImageIcon(item.imageFile);
+                // 이미지가 실제로 로드되었는지 확인
+                if (icon.getIconWidth() > 0) {
+                    Image img = icon.getImage().getScaledInstance(200, 130, Image.SCALE_SMOOTH);
+                    imageLabel.setIcon(new ImageIcon(img));
+                    imageLoaded = true;
+                }
+            } catch (Exception e) {
+                imageLoaded = false;
+            }
+            
+            // 이미지가 없으면 이모지 표시
+            if (!imageLoaded) {
+                String emoji = getFoodEmoji(item.name);
+                imageLabel.setText(emoji);
+                imageLabel.setFont(new Font("맑은 고딕", Font.PLAIN, 64));
+            }
+            
+            imagePanel.add(imageLabel, BorderLayout.CENTER);
+            add(imagePanel, BorderLayout.CENTER);
+            
+            // 음식 이름만 표시 (가격 제거)
+            JPanel infoPanel = new JPanel(new BorderLayout());
+            infoPanel.setBackground(Color.WHITE);
+            infoPanel.setBorder(BorderFactory.createEmptyBorder(8, 5, 8, 5));
+            
+            JLabel nameLabel = new JLabel(item.name, SwingConstants.CENTER);
+            nameLabel.setFont(new Font("맑은 고딕", Font.BOLD, 16));
+            nameLabel.setForeground(new Color(51, 51, 51));
+            
+            infoPanel.add(nameLabel, BorderLayout.CENTER);
+            add(infoPanel, BorderLayout.SOUTH);
+            
+            // 마우스 호버 효과
+            addMouseListener(new MouseAdapter() {
+                public void mouseEntered(MouseEvent e) {
+                    setBackground(new Color(255, 248, 220));
+                    imagePanel.setBackground(new Color(255, 248, 220));
+                    infoPanel.setBackground(new Color(255, 248, 220));
+                    setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(new Color(255, 140, 0), 2),
+                        BorderFactory.createEmptyBorder(5, 5, 5, 5)
+                    ));
+                }
+                
+                public void mouseExited(MouseEvent e) {
+                    setBackground(Color.WHITE);
+                    imagePanel.setBackground(new Color(250, 250, 250));
+                    infoPanel.setBackground(Color.WHITE);
+                    setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(new Color(200, 200, 200), 2),
+                        BorderFactory.createEmptyBorder(5, 5, 5, 5)
+                    ));
+                }
+                
+                public void mouseClicked(MouseEvent e) { 
+                    showShopSelection(item); 
+                }
+            });
+        }
+        
+        // 음식별 이모지 반환
+        private String getFoodEmoji(String foodName) {
+            switch (foodName) {
+                // 한식
+                case "불고기": return "🥩";
+                case "김치찌개": return "🍲";
+                case "비빔밥": return "🍚";
+                case "삼겹살": return "🥓";
+                case "밥": return "🍚";
+                
+                // 중식
+                case "짜장면": return "🍜";
+                case "짬뽕": return "🍜";
+                case "탕수육": return "🍖";
+                
+                // 분식
+                case "떡볶이": return "🌶️";
+                case "라면": return "🍜";
+                case "김밥": return "🍱";
+                
+                // 양식
+                case "치킨": return "🍗";
+                case "피자": return "🍕";
+                case "햄버거": return "🍔";
+                case "샌드위치": return "🥪";
+                case "샐러드": return "🥗";
+                case "파스타": return "🍝";
+                case "스테이크": return "🥩";
+                
+                // 일식
+                case "돈까스": return "🍛";
+                case "초밥": return "🍣";
+                
+                default: return "🍽️";
+            }
+        }
+    }
+
+    private class ShopPanel extends JPanel {
+        public ShopPanel(MenuItem item) {
+            setName("FOOD_DETAIL_SHOP");
+            setLayout(new BorderLayout());
+            setBorder(BorderFactory.createEmptyBorder(20, 50, 20, 50));
+            add(new JLabel(item.name + " 관련 가게 선택", SwingConstants.CENTER), BorderLayout.NORTH);
+            JPanel shopListContainer = new JPanel();
+            shopListContainer.setLayout(new BoxLayout(shopListContainer, BoxLayout.Y_AXIS));
+            JScrollPane scrollPane = new JScrollPane(shopListContainer);
+            List<Shop> currentShops = shopData.getOrDefault(item.name, new ArrayList<>());
+            for (Shop shop : currentShops) {
+                JPanel shopRow = new JPanel(new FlowLayout(FlowLayout.CENTER));
+                JButton shopButton = new JButton(shop.name + " (" + String.format("%,d", shop.price) + "원)");
+                shopButton.setPreferredSize(new Dimension(300, 50));
+                shopButton.addActionListener(e -> showFinalPrice(item, shop.name, shop.price));
+                shopRow.add(shopButton);
+                if (isAdmin) {
+                    JButton delBtn = new JButton("삭제");
+                    delBtn.setForeground(Color.RED);
+                    delBtn.addActionListener(e -> { currentShops.remove(shop); saveShopData(); showShopSelection(item); });
+                    shopRow.add(delBtn);
+                }
+                shopListContainer.add(shopRow);
+            }
+            if(isAdmin) {
+                JButton addBtn = new JButton("+ 가게 추가");
+                addBtn.addActionListener(e -> {
+                    String name = JOptionPane.showInputDialog("가게 이름");
+                    String price = JOptionPane.showInputDialog("가격");
+                    if(name!=null && price!=null) {
+                        try { currentShops.add(new Shop(name, Integer.parseInt(price))); saveShopData(); showShopSelection(item); }
+                        catch(Exception ex) {}
+                    }
+                });
+                shopListContainer.add(addBtn);
+            }
+            add(scrollPane, BorderLayout.CENTER);
+            JButton backButton = new JButton("돌아가기");
+            backButton.addActionListener(e -> cardLayout.show(mainPanel, "FOOD_MENU_SCREEN"));
+            add(backButton, BorderLayout.SOUTH);
+        }
+    }
+
+    private class PricePanel extends JPanel {
+        private int quantity = 1;
+        private JLabel quantityLabel, totalPriceLabel;
+        public PricePanel(MenuItem item, String shopName, int unitPrice) {
+            setName("FOOD_DETAIL_PRICE");
+            setLayout(new BorderLayout());
+            setBorder(BorderFactory.createEmptyBorder(50, 50, 50, 50));
+            add(new JLabel(shopName + " - " + item.name, SwingConstants.CENTER), BorderLayout.NORTH);
+            JPanel centerInfo = new JPanel(new GridBagLayout());
+            GridBagConstraints gbc = new GridBagConstraints(); gbc.insets = new Insets(10, 10, 10, 10); gbc.gridy=0;
+            centerInfo.add(new JLabel("단가: " + unitPrice + "원"), gbc);
+            gbc.gridy++;
+            JPanel qPanel = new JPanel();
+            JButton minus = new JButton("-"); JButton plus = new JButton("+");
+            quantityLabel = new JLabel("1"); totalPriceLabel = new JLabel("총: " + unitPrice + "원");
+            minus.addActionListener(e -> { if(quantity>1) quantity--; updatePrice(unitPrice); });
+            plus.addActionListener(e -> { if(quantity<99) quantity++; updatePrice(unitPrice); });
+            qPanel.add(minus); qPanel.add(quantityLabel); qPanel.add(plus);
+            centerInfo.add(qPanel, gbc);
+            gbc.gridy++; centerInfo.add(totalPriceLabel, gbc);
+            add(centerInfo, BorderLayout.CENTER);
+            JButton orderBtn = new JButton("주문하기");
+            orderBtn.addActionListener(e -> {
+                currentOrderList.add(new FoodOrder(item.name, shopName, unitPrice, quantity));
+                cardLayout.show(mainPanel, "CURRENT_ORDER_SCREEN");
+            });
+            JButton backBtn = new JButton("취소");
+            backBtn.addActionListener(e -> showShopSelection(item));
+            JPanel btnPanel = new JPanel(); btnPanel.add(backBtn); btnPanel.add(orderBtn);
+            add(btnPanel, BorderLayout.SOUTH);
+        }
+        private void updatePrice(int unitPrice) {
+            quantityLabel.setText(String.valueOf(quantity));
+            totalPriceLabel.setText("총: " + String.format("%,d", (long)unitPrice * quantity) + "원");
+        }
+    }
+
+    private class PaymentCompletePanel extends JPanel {
+        public PaymentCompletePanel(String message) {
+            setLayout(new GridBagLayout());
+            GridBagConstraints gbc = new GridBagConstraints(); gbc.gridy=0; gbc.insets = new Insets(10,0,10,0);
+            add(new JLabel("결제 완료"), gbc);
+            gbc.gridy++; add(new JLabel(message), gbc);
+            JButton okBtn = new JButton("확인");
+            okBtn.addActionListener(e -> cardLayout.show(mainPanel, "MAINAPP"));
+            gbc.gridy++; add(okBtn, gbc);
+        }
+    }
+
+    private void showShopSelection(MenuItem item) {
+        for (int i=0; i<mainPanel.getComponentCount(); i++) {
+            if ("FOOD_DETAIL_SHOP".equals(mainPanel.getComponent(i).getName())) { mainPanel.remove(i); break; }
+        }
+        mainPanel.add(new ShopPanel(item), "FOOD_DETAIL_SHOP");
+        cardLayout.show(mainPanel, "FOOD_DETAIL_SHOP");
+    }
+
+    private void showFinalPrice(MenuItem item, String shopName, int price) {
+        for (int i=0; i<mainPanel.getComponentCount(); i++) {
+            if ("FOOD_DETAIL_PRICE".equals(mainPanel.getComponent(i).getName())) { mainPanel.remove(i); break; }
+        }
+        mainPanel.add(new PricePanel(item, shopName, price), "FOOD_DETAIL_PRICE");
+        cardLayout.show(mainPanel, "FOOD_DETAIL_PRICE");
+    }
+
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(Soulfoodb::new);
+    }
+    
+ // 찜 추가/삭제 DB 메서드 추가
+    private void saveOrderHistoryToDB(List<FoodOrder> items, String username) {
+        System.out.println("\n[주문 이력 DB 저장 시작]");
+        System.out.println("  사용자: " + username);
+        System.out.println("  주문 항목 수: " + items.size());
+        
+        String query = "INSERT INTO order_history (user_id, food_name, shop_name, price, order_date) " +
+                      "SELECT user_id, ?, ?, ?, NOW() FROM users WHERE username = ?";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            
+            for (FoodOrder item : items) {
+                pstmt.setString(1, item.foodName);
+                pstmt.setString(2, item.shopName);
+                pstmt.setInt(3, item.unitPrice);
+                pstmt.setString(4, username);
+                
+                int result = pstmt.executeUpdate();
+                
+                if (result > 0) {
+                    System.out.println("  ✅ " + item.foodName + " (" + item.shopName + ") 저장");
+                } else {
+                    System.out.println("  ❌ " + item.foodName + " 저장 실패");
+                }
+            }
+            
+        } catch (Exception e) {
+            System.err.println("  ❌ 주문 이력 저장 실패: " + e.getMessage());
+            e.printStackTrace();
+        }
+        System.out.println("[주문 이력 DB 저장 끝]\n");
+    }
+
+    private void syncUsersFileToDatabase() {
+        System.out.println("\n[사용자 파일→DB 동기화 시작]");
+        
+        int synced = 0;
+        for (Map.Entry<String, String> entry : userData.entrySet()) {
+            String username = entry.getKey();
+            String password = entry.getValue();
+            
+            String query = "INSERT IGNORE INTO users (username, password) VALUES (?, ?)";
+            
+            try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+                 java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+                pstmt.setString(1, username);
+                pstmt.setString(2, password);
+                int result = pstmt.executeUpdate();
+                
+                if (result > 0) {
+                    System.out.println("  ✅ " + username + " → DB 저장");
+                    synced++;
+                }
+            } catch (Exception e) {
+                System.err.println("  ❌ " + username + " 저장 실패");
+            }
+        }
+        
+        System.out.println("[동기화 완료: " + synced + "명]\n");
+    }
+
+    private void saveUserToDB(String username, String password) {
+        System.out.println("\n[회원가입 DB 저장 시작]");
+        System.out.println("  username: " + username);
+        
+        String query = "INSERT IGNORE INTO users (username, password) VALUES (?, ?)";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, username);
+            pstmt.setString(2, password);
+            
+            int result = pstmt.executeUpdate();
+            
+            if (result > 0) {
+                System.out.println("  ✅ users 테이블에 저장 성공!");
+            } else {
+                System.out.println("  ⚠️ 이미 존재하거나 저장 실패");
+            }
+            
+        } catch (Exception e) {
+            System.err.println("  ❌ DB 저장 실패: " + e.getMessage());
+            e.printStackTrace();
+        }
+        System.out.println("[회원가입 DB 저장 끝]\n");
+    }
+    
+    private void saveUserCategoriesToDB(String username, Set<String> categories) {
+        System.out.println("\n[카테고리 DB 저장 시작]");
+        System.out.println("  username: " + username);
+        System.out.println("  categories: " + categories);
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection()) {
+            // 먼저 user_id 가져오기
+            java.sql.PreparedStatement pstmt1 = conn.prepareStatement(
+                "SELECT user_id FROM users WHERE username = ?");
+            pstmt1.setString(1, username);
+            java.sql.ResultSet rs = pstmt1.executeQuery();
+            
+            if (rs.next()) {
+                int userId = rs.getInt("user_id");
+                System.out.println("  user_id: " + userId);
+                
+                // 각 카테고리 저장
+                String insertQuery = "INSERT IGNORE INTO user_categories (user_id, category_name) VALUES (?, ?)";
+                java.sql.PreparedStatement pstmt2 = conn.prepareStatement(insertQuery);
+                
+                for (String category : categories) {
+                    pstmt2.setInt(1, userId);
+                    pstmt2.setString(2, category);
+                    int result = pstmt2.executeUpdate();
+                    System.out.println("  카테고리 '" + category + "': " + (result > 0 ? "✅" : "⚠️"));
+                }
+                
+                pstmt2.close();
+            } else {
+                System.out.println("  ❌ user_id를 찾을 수 없음!");
+            }
+            
+            rs.close();
+            pstmt1.close();
+            
+        } catch (Exception e) {
+            System.err.println("  ❌ 카테고리 저장 실패: " + e.getMessage());
+            e.printStackTrace();
+        }
+        System.out.println("[카테고리 DB 저장 끝]\n");
+    }
+
+    private void addFavoriteToDB(String foodName) {
+        if (currentUser == null) {
+            System.out.println("❌ addFavoriteToDB: currentUser is null");
+            return;
+        }
+        
+        System.out.println("\n[찜 추가 시작]");
+        System.out.println("  음식: " + foodName);
+        System.out.println("  사용자: " + currentUser);
+        
+        String query = "INSERT IGNORE INTO favorites (user_id, food_name) " +
+                      "SELECT user_id, ? FROM users WHERE username = ?";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, foodName);
+            pstmt.setString(2, currentUser);
+            
+            System.out.println("  쿼리 실행: " + query);
+            System.out.println("  파라미터: [" + foodName + ", " + currentUser + "]");
+            
+            int result = pstmt.executeUpdate();
+            
+            System.out.println("  결과: " + result + " row(s) inserted");
+            
+            if (result == 0) {
+                System.out.println("  ⚠️ INSERT 실패! users 테이블 확인 필요");
+            } else {
+                System.out.println("  ✅ DB에 저장 성공!");
+            }
+            
+        } catch (Exception e) {
+            System.err.println("  ❌ 오류 발생: " + e.getMessage());
+            e.printStackTrace();
+        }
+        System.out.println("[찜 추가 끝]\n");
+    }
+
+    private void deleteFavoriteFromDB(String foodName) {
+        if (currentUser == null) {
+            System.out.println("❌ deleteFavoriteFromDB: currentUser is null");
+            return;
+        }
+        
+        System.out.println("\n[찜 삭제 시작]");
+        System.out.println("  음식: " + foodName);
+        System.out.println("  사용자: " + currentUser);
+        
+        String query = "DELETE FROM favorites WHERE user_id = " +
+                      "(SELECT user_id FROM users WHERE username = ?) " +
+                      "AND food_name = ?";
+        
+        try (java.sql.Connection conn = DBConnect.getInstance().getConnection();
+             java.sql.PreparedStatement pstmt = conn.prepareStatement(query)) {
+            pstmt.setString(1, currentUser);
+            pstmt.setString(2, foodName);
+            
+            System.out.println("  쿼리 실행: " + query);
+            
+            int result = pstmt.executeUpdate();
+            
+            System.out.println("  결과: " + result + " row(s) deleted");
+            
+            if (result == 0) {
+                System.out.println("  ⚠️ 삭제할 데이터 없음");
+            } else {
+                System.out.println("  ✅ DB에서 삭제 성공!");
+            }
+            
+        } catch (Exception e) {
+            System.err.println("  ❌ 오류 발생: " + e.getMessage());
+            e.printStackTrace();
+        }
+        System.out.println("[찜 삭제 끝]\n");
+    }    
+}
