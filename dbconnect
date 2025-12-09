@@ -1,0 +1,202 @@
+package dbconnect;
+
+import java.sql.*;
+
+public class DBConnect {
+    
+    // Singleton 인스턴스
+    private static DBConnect instance;
+    
+    // 데이터베이스 연결 정보
+    private static final String DB_URL = "jdbc:mysql://localhost:3306/soulfoodb?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Seoul";
+    private static final String DB_USER = "root";
+    private static final String DB_PASSWORD = "pororo17@"; // ← 실제 MySQL 비밀번호로 변경하세요
+    private static final String DB_DRIVER = "com.mysql.cj.jdbc.Driver";
+    
+    // Connection 객체
+    private Connection connection;
+    
+    /**
+     * Private 생성자 - Singleton 패턴
+     */
+    private DBConnect() {
+        try {
+            // JDBC 드라이버 로드
+            Class.forName(DB_DRIVER);
+            System.out.println("✅ MySQL JDBC 드라이버 로드 성공");
+        } catch (ClassNotFoundException e) {
+            System.err.println("❌ JDBC 드라이버를 찾을 수 없습니다: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * DBConnect 인스턴스를 반환 (Singleton)
+     * @return DBConnect 인스턴스
+     */
+    public static DBConnect getInstance() {
+        if (instance == null) {
+            synchronized (DBConnect.class) {
+                if (instance == null) {
+                    instance = new DBConnect();
+                }
+            }
+        }
+        return instance;
+    }
+    
+    /**
+     * 데이터베이스 연결을 생성하여 반환
+     * @return Connection 객체
+     * @throws SQLException 연결 실패 시
+     */
+    public Connection getConnection() throws SQLException {
+        if (connection == null || connection.isClosed()) {
+            try {
+                connection = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+                System.out.println("✅ 데이터베이스 연결 성공: " + DB_URL);
+            } catch (SQLException e) {
+                System.err.println("❌ 데이터베이스 연결 실패: " + e.getMessage());
+                throw e;
+            }
+        }
+        return connection;
+    }
+    
+    /**
+     * 데이터베이스 연결 종료
+     */
+    public void closeConnection() {
+        if (connection != null) {
+            try {
+                connection.close();
+                System.out.println("✅ 데이터베이스 연결 종료");
+            } catch (SQLException e) {
+                System.err.println("❌ 연결 종료 중 오류 발생: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+    }
+    
+    /**
+     * PreparedStatement, ResultSet 자동 종료
+     * @param rs ResultSet
+     * @param pstmt PreparedStatement
+     */
+    public void close(ResultSet rs, PreparedStatement pstmt) {
+        try {
+            if (rs != null && !rs.isClosed()) {
+                rs.close();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        
+        try {
+            if (pstmt != null && !pstmt.isClosed()) {
+                pstmt.close();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * PreparedStatement만 종료
+     * @param pstmt PreparedStatement
+     */
+    public void close(PreparedStatement pstmt) {
+        try {
+            if (pstmt != null && !pstmt.isClosed()) {
+                pstmt.close();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * CallableStatement 종료
+     * @param cstmt CallableStatement
+     */
+    public void close(CallableStatement cstmt) {
+        try {
+            if (cstmt != null && !cstmt.isClosed()) {
+                cstmt.close();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 데이터베이스 연결 테스트
+     * @return 연결 성공 여부
+     */
+    public boolean testConnection() {
+        try {
+            Connection conn = getConnection();
+            if (conn != null && !conn.isClosed()) {
+                System.out.println("✅ 데이터베이스 연결 테스트 성공!");
+                return true;
+            }
+        } catch (SQLException e) {
+            System.err.println("❌ 데이터베이스 연결 테스트 실패!");
+            e.printStackTrace();
+        }
+        return false;
+    }
+    
+    /**
+     * 데이터베이스 연결 정보 출력 (디버깅용)
+     */
+    public void printConnectionInfo() {
+        System.out.println("═══════════════════════════════════");
+        System.out.println("  데이터베이스 연결 정보");
+        System.out.println("═══════════════════════════════════");
+        System.out.println("URL: " + DB_URL);
+        System.out.println("User: " + DB_USER);
+        System.out.println("Driver: " + DB_DRIVER);
+        System.out.println("═══════════════════════════════════");
+    }
+    
+    /**
+     * 메인 메서드 - 연결 테스트용
+     */
+    public static void main(String[] args) {
+        DBConnect dbConnect = DBConnect.getInstance();
+        
+        // 연결 정보 출력
+        dbConnect.printConnectionInfo();
+        
+        // 연결 테스트
+        if (dbConnect.testConnection()) {
+            System.out.println("\n🎉 데이터베이스 연결이 정상적으로 작동합니다!");
+            
+            // 테이블 목록 조회 테스트
+            try {
+                Connection conn = dbConnect.getConnection();
+                DatabaseMetaData metaData = conn.getMetaData();
+                ResultSet tables = metaData.getTables("soulfoodb", null, "%", new String[]{"TABLE"});
+                
+                System.out.println("\n📋 테이블 목록:");
+                while (tables.next()) {
+                    System.out.println("  - " + tables.getString("TABLE_NAME"));
+                }
+                tables.close();
+                
+            } catch (SQLException e) {
+                System.err.println("❌ 테이블 목록 조회 실패: " + e.getMessage());
+                e.printStackTrace();
+            }
+            
+        } else {
+            System.out.println("\n❌ 데이터베이스 연결에 실패했습니다.");
+            System.out.println("다음 사항을 확인하세요:");
+            System.out.println("1. MySQL 서버가 실행 중인지 확인");
+            System.out.println("2. DB_PASSWORD가 올바른지 확인");
+            System.out.println("3. soulfoodb 데이터베이스가 생성되었는지 확인");
+            System.out.println("4. MySQL JDBC 드라이버가 Build Path에 추가되었는지 확인");
+        }
+    }
+}
